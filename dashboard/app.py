@@ -18,11 +18,11 @@ st.set_page_config(page_title="Airtel retention", page_icon="📶", layout="wide
 # ------------------------------------------------------------------ configuration
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent if HERE.name == "dashboard" else HERE
-# Database path (fixed). Set AIRTEL_DB to override it.
-DB_PATH = Path(os.environ.get("AIRTEL_DB") or
-               r"C:\Users\MUEENUDHEEN\OneDrive\Desktop\airtel-telecom-analytics\data\airtel_dashboard_slim.db")
-if not DB_PATH.is_file():
-    DB_PATH = None
+# Database lookup (works locally and on Streamlit Cloud): AIRTEL_DB env var, then paths relative to the project.
+DB_NAME = "airtel_dashboard_slim.db"
+DB_CANDIDATES = [os.environ.get("AIRTEL_DB", ""), ROOT / "data" / DB_NAME, HERE / "data" / DB_NAME,
+                 HERE / DB_NAME, ROOT / DB_NAME]
+DB_PATH = next((Path(p) for p in DB_CANDIDATES if p and Path(p).is_file()), None)
 
 # ---- Mapping to the Airtel database (edit here if your validated definitions differ) ----
 CUSTOMERS = ("customers c JOIN circles ci ON ci.circle_id = c.circle_id "
@@ -527,8 +527,8 @@ def show(fig):
 
 # ------------------------------------------------------------------ state, banner, sidebar
 if DB_PATH is None:
-    st.error(r"Could not find the Airtel database at C:\Users\MUEENUDHEEN\OneDrive\Desktop\airtel-telecom-analytics\data\airtel_dashboard_slim.db. "
-             "Check that the file exists, or set the AIRTEL_DB environment variable.")
+    st.error("Could not find airtel_dashboard_slim.db. Put it in the data/ folder of the project "
+             "(and commit it to GitHub if this app runs on Streamlit Cloud), or set the AIRTEL_DB environment variable.")
     st.stop()
 try:
     circles = q("SELECT circle_name AS v FROM circles ORDER BY v")["v"].tolist()
