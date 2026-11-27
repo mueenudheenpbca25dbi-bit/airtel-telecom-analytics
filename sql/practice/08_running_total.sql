@@ -1,4 +1,4 @@
--- Tool 8: Running totals (count loans and books still out so far)
+-- Tool 8: Running totals (count loans and books still out so far)calculate,cumilative row by row
 SELECT loan_date,
        book,
        COUNT(*) OVER (ORDER BY loan_date, loan_id) AS loans_so_far,

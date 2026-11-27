@@ -13,3 +13,4 @@ FROM b
 JOIN members AS m
     ON m.member_id = b.member_id
 ORDER BY b.books DESC, m.member_id;
+rows ne sort aakitt group aaki divide aakuka
