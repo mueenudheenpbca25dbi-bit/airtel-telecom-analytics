@@ -25,13 +25,12 @@ DB_CANDIDATES = [os.environ.get("AIRTEL_DB", ""), ROOT / "data" / DB_NAME, HERE 
 DB_PATH = next((Path(p) for p in DB_CANDIDATES if p and Path(p).is_file()), None)
 
 # ---- Mapping to the Airtel database (edit here if your validated definitions differ) ----
-CUSTOMERS = ("customers c JOIN circles ci ON ci.circle_id = c.circle_id "
-             "LEFT JOIN v_complaint_customer v ON v.customer_id = c.customer_id")
-CIRCLE_COL, REGION_COL, CONN_COL = "ci.circle_name", "ci.region", "c.connection_type"
+CUSTOMERS = "customer_features c"                # one flat table: customer + circle + complaint features
+CIRCLE_COL, REGION_COL, CONN_COL = "c.circle_name", "c.region", "c.connection_type"
 LEAVER_SQL = "c.is_churned = 1"                  # leaver definition
 LEAVE_DATE_COL = "c.churn_date"                  # month of leaving
-OPEN_SQL = "v.unresolved_count > 0"              # open-ticket subscriber (has an unresolved complaint)
-AS_OF = "(SELECT MAX(churn_date) FROM customers)"  # end of observation window for active customers
+OPEN_SQL = "c.unresolved_count > 0"              # open-ticket subscriber (has an unresolved complaint)
+AS_OF = "(SELECT MAX(churn_date) FROM customer_features)"  # end of observation window for active customers
 TENURE_MONTHS = f"((julianday(COALESCE(c.churn_date, {AS_OF})) - julianday(c.activation_date)) / 30.4375)"
 SCOPE_SQL = ""                                   # e.g. "c.ab_group = 'B'" if the validated population is narrower
 TOP_N = 8                                        # circles shown in the ranking chart
@@ -531,9 +530,9 @@ if DB_PATH is None:
              "(and commit it to GitHub if this app runs on Streamlit Cloud), or set the AIRTEL_DB environment variable.")
     st.stop()
 try:
-    circles = q("SELECT circle_name AS v FROM circles ORDER BY v")["v"].tolist()
-    regions = q("SELECT DISTINCT region AS v FROM circles ORDER BY v")["v"].tolist()
-    conns = q("SELECT DISTINCT connection_type AS v FROM customers ORDER BY v")["v"].tolist()
+    circles = q("SELECT DISTINCT circle_name AS v FROM customer_features ORDER BY v")["v"].tolist()
+    regions = q("SELECT DISTINCT region AS v FROM customer_features ORDER BY v")["v"].tolist()
+    conns = q("SELECT DISTINCT connection_type AS v FROM customer_features ORDER BY v")["v"].tolist()
     as_of = q(f"SELECT {AS_OF} AS d")["d"][0]
 except Exception as e:
     st.error(f"The database does not match the mapping at the top of this file: {e}")
