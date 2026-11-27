@@ -40,8 +40,8 @@ T4_P_VALUE = 0.032            # validated T4 result, one-tailed (fixed, not live
 MIN_GROUP = 100               # groups smaller than this show counts, not rates
 
 # Explicit chart heights (px): (supporting chart, hero chart = two supporting charts stacked + panel header)
-SCREENS = {"Large monitor (1080p)": (335, 2 * 335 + 27), "Laptop (900p)": (235, 2 * 235 + 27),
-           "Small laptop (768p)": (160, 2 * 160 + 27)}
+SCREENS = {"Large (1080p)": (265, 2 * 265 + 116), "Laptop (900p)": (190, 2 * 190 + 116),
+           "Small (768p)": (130, 2 * 130 + 116)}
 RED, DEEP, SOFT, GREY, GREEN = "#E40000", "#a8000f", "#f2a0a0", "#8b94a7", "#2e9e5b"
 INK, MUTED = "#2a1217", "#6f5a5e"
 REDS = [[0, "#fff1f1"], [.5, "#ff8a8a"], [1, "#b00010"]]
@@ -64,12 +64,20 @@ STYLE_LABELS = {"tenure": "Tenure chart", "circle": "Circle chart", "conn": "Con
                 "d_month": "Monthly leavers chart", "d_compare": "Circle vs national chart",
                 "d_tenure": "Tenure chart", "d_conn": "Connection chart"}
 OVERVIEW_SLOTS, DETAIL_SLOTS = ["tenure", "circle", "conn"], ["d_month", "d_compare", "d_tenure", "d_conn"]
-# Extra subscriber filters (multi-select; empty = all): (session key, label, column)
-DIM_FILTERS = [("f_plan", "Plan", "c.plan_name"), ("f_age", "Age band", "c.age_band"), ("f_gender", "Gender", "c.gender"),
-               ("f_device", "Device type", "c.device_type"), ("f_channel", "Acquisition channel", "c.acquisition_channel")]
-PRICE_COL = "c.price_inr"
-DEFAULTS = {"f_conn": "All", "f_region": "All", "f_circles": [], "f_tenure": [], "f_open": False, "f_topn": TOP_N,
-            **{k: [] for k, _, _ in DIM_FILTERS}, "s_screen": "Large monitor (1080p)", **{f"s_{k}": v[0] for k, v in STYLES.items()}}
+# Each chart has its own filters (multi-select; empty = all): slot -> [(label, column), ...]
+CHART_FILTERS = {
+    "tenure": [("Age", "c.age_band"), ("Gender", "c.gender")],
+    "circle": [("Channel", "c.acquisition_channel"), ("Device", "c.device_type")],
+    "conn": [("Age", "c.age_band"), ("Device", "c.device_type")],
+    "d_month": [("Age", "c.age_band"), ("Gender", "c.gender")],
+    "d_compare": [("Channel", "c.acquisition_channel"), ("Age", "c.age_band")],
+    "d_tenure": [("Gender", "c.gender"), ("Device", "c.device_type")],
+    "d_conn": [("Age", "c.age_band"), ("Channel", "c.acquisition_channel")],
+}
+TOP_CHOICES = [5, 8, 10, 15]
+DEFAULTS = {"f_conn": "All", "f_region": "All", "cf_circle_top": TOP_N, "s_screen": "Large (1080p)",
+            **{f"s_{k}": v[0] for k, v in STYLES.items()},
+            **{f"cf_{slot}_{i}": [] for slot, fl in CHART_FILTERS.items() for i in range(len(fl))}}
 
 # ------------------------------------------------------------------ SQL fragments
 LEFT = f"SUM(CASE WHEN {LEAVER_SQL} THEN 1 ELSE 0 END)"
@@ -95,8 +103,13 @@ def marks(vals):
     return ",".join("?" * len(vals))
 
 
-def where(conn="All", region="All", circle=None, extra=(), dims=True, circles=()):
-    """WHERE clause shared by every card and chart, so one filter set drives the whole page."""
+def chart_filters(slot):
+    """The filter values picked on one chart's own controls."""
+    return [(col, list(st.session_state.get(f"cf_{slot}_{i}") or [])) for i, (_, col) in enumerate(CHART_FILTERS[slot])]
+
+
+def where(conn="All", region="All", circle=None, extra=(), flt=()):
+    """WHERE clause: page-level filters (connection, region or circle) plus the chart's own filters."""
     conds, params = ([SCOPE_SQL] if SCOPE_SQL else []) + list(extra), []
     if conn != "All":
         conds.append(f"{CONN_COL} = ?")
@@ -104,30 +117,13 @@ def where(conn="All", region="All", circle=None, extra=(), dims=True, circles=()
     if circle:
         conds.append(f"{CIRCLE_COL} = ?")
         params.append(circle)
-    else:
-        if region != "All":
-            conds.append(f"{REGION_COL} = ?")
-            params.append(region)
-        if circles:
-            conds.append(f"{CIRCLE_COL} IN ({marks(circles)})")
-            params += list(circles)
-    if dims:
-        ss = st.session_state
-        for key, _, col in DIM_FILTERS:
-            vals = list(ss.get(key) or [])
-            if vals:
-                conds.append(f"{col} IN ({marks(vals)})")
-                params += vals
-        tv = list(ss.get("f_tenure") or [])
-        if tv:
-            conds.append(f"{TENURE_GRP} IN ({marks(tv)})")
-            params += tv
-        if ss.get("f_open"):
-            conds.append(f"({OPEN_SQL})")
-        lo, hi = ss.get("f_price", PRICE_RANGE)
-        if (lo, hi) != PRICE_RANGE:
-            conds.append(f"{PRICE_COL} BETWEEN ? AND ?")
-            params += [lo, hi]
+    elif region != "All":
+        conds.append(f"{REGION_COL} = ?")
+        params.append(region)
+    for col, vals in flt:
+        if vals:
+            conds.append(f"{col} IN ({marks(vals)})")
+            params += vals
     return (" WHERE " + " AND ".join(conds) if conds else ""), tuple(params)
 
 
@@ -148,81 +144,84 @@ st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap');
 html, body, .stApp, [class*="st-"] {{font-family:'Poppins','Segoe UI',sans-serif;}}
+/* keep Streamlit's icon font (otherwise icon names show as text and overlap) */
+.stApp [data-testid="stIconMaterial"], .stApp .material-icons, .stApp .material-symbols-rounded {{
+  font-family:'Material Symbols Rounded','Material Icons' !important; font-weight:400; letter-spacing:normal; text-transform:none;}}
 #MainMenu, footer, [data-testid="stToolbar"] {{display:none;}}
 header[data-testid="stHeader"] {{background:transparent; height:0; pointer-events:none;}}
 header[data-testid="stHeader"] button, header[data-testid="stHeader"] a {{pointer-events:auto;}}
-.stApp {{background:linear-gradient(160deg,#fff 0%,#fff6f6 60%,#ffeaea 100%); color-scheme:light; color:{INK};}}
-.block-container {{padding:.4rem 1rem 0 1rem; max-width:100%;}}
-div[data-testid="stVerticalBlock"] {{gap:.4rem;}}
-div[data-testid="stHorizontalBlock"] {{gap:.6rem;}}
+.stApp {{background:#f3f4f8; color-scheme:light; color:{INK};}}
+.block-container {{padding:.6rem 1.1rem .5rem 1.1rem; max-width:100%;}}
+div[data-testid="stVerticalBlock"] {{gap:.5rem;}}
+div[data-testid="stHorizontalBlock"] {{gap:.7rem;}}
 div[data-testid="stElementContainer"] {{margin:0;}}
 
-/* banner */
-.st-key-banner {{background:linear-gradient(100deg,#7d000c 0%,#c40016 45%,#ef2b2b 100%); border-radius:14px;
-  padding:6px 18px; position:relative; overflow:hidden; box-shadow:0 4px 14px rgba(160,0,20,.25);}}
-.st-key-banner:before {{content:""; position:absolute; pointer-events:none; z-index:0; right:-80px; top:-60px; width:340px; height:340px; border-radius:50%;
-  background:radial-gradient(circle,rgba(255,255,255,.22),rgba(255,255,255,0) 65%); animation:glow 7s ease-in-out infinite;}}
-@keyframes glow {{50% {{transform:translate(-40px,18px) scale(1.15);}}}}
-.hdr {{display:flex; align-items:center; gap:14px; position:relative; z-index:1; padding-bottom:1rem;}}
-.st-key-banner [data-testid="stHorizontalBlock"] {{position:relative; z-index:2;}}
-.hdr .div {{width:2px; height:38px; background:rgba(255,255,255,.55);}}
+/* header */
+.st-key-banner {{background:linear-gradient(95deg,#c80016 0%,#e4002b 100%); border-radius:16px; padding:8px 20px;
+  box-shadow:0 6px 18px rgba(200,0,30,.20);}}
+.hdr {{display:flex; align-items:center; gap:14px; padding-bottom:.9rem;}}
+.hdr .div {{width:1px; height:38px; background:rgba(255,255,255,.5);}}
 .logo {{display:flex; align-items:center;}}
-.logo img {{height:48px; width:auto; display:block;}}
+.logo img {{height:46px; width:auto; display:block;}}
 .logo.chip {{background:#fff; border-radius:10px; padding:4px 12px;}} .logo.chip img {{height:34px;}}
-.ttl {{font-size:1.2rem; font-weight:700; color:#fff; line-height:1.2;}}
+.ttl {{font-size:1.15rem; font-weight:700; color:#fff; line-height:1.2;}}
 .rdr {{font-size:.72rem; color:#ffe3e3;}}
-.st-key-banner .stButton button {{background:rgba(255,255,255,.15); color:#fff; border:1px solid rgba(255,255,255,.55);
-  border-radius:10px; font-weight:600; min-height:36px; width:100%;}}
-.st-key-banner .stButton button p {{color:inherit; font-size:.86rem; margin:0;}}
-.st-key-banner .stButton button:hover {{background:rgba(255,255,255,.3); border-color:#fff; color:#fff;}}
+.st-key-banner .stButton button {{background:transparent; color:#fff; border:1px solid rgba(255,255,255,.6);
+  border-radius:99px; font-weight:600; min-height:36px; width:100%;}}
+.st-key-banner .stButton button p {{color:inherit; font-size:.84rem; margin:0;}}
+.st-key-banner .stButton button:hover {{background:rgba(255,255,255,.22); border-color:#fff; color:#fff;}}
 .st-key-nav_{ACTIVE_NAV} button {{background:#fff !important; color:{RED} !important; border-color:#fff !important;}}
 
-/* dark filter sidebar */
-section[data-testid="stSidebar"] {{background:linear-gradient(180deg,#1b1b1f 0%,#2a2a2f 62%,#6b0712 100%);
-  min-width:280px !important; max-width:280px !important; border-right:3px solid {RED};}}
-section[data-testid="stSidebar"] * {{color:#f4f4f6;}}
-section[data-testid="stSidebar"] .block-container, section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {{padding-top:.6rem;}}
-section[data-testid="stSidebar"] label p {{color:#e9e9ee !important; font-size:.76rem !important; margin:0 !important;}}
-div[data-baseweb="select"] > div {{background:#fff !important; border:none; border-radius:8px; min-height:34px;}}
+/* left filter panel */
+section[data-testid="stSidebar"] {{background:#fff; min-width:250px !important; max-width:250px !important; border-right:1px solid #e8eaf0;}}
+section[data-testid="stSidebar"] * {{color:{INK};}}
+section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {{padding-top:.4rem;}}
+label p {{color:{MUTED} !important; font-size:.74rem !important; font-weight:600; margin:0 !important;}}
+div[data-baseweb="select"] > div {{background:#f6f7fb !important; border:1px solid #e3e5ec !important; border-radius:9px; min-height:34px;}}
 div[data-baseweb="select"] * {{color:{INK} !important;}}
+div[data-baseweb="select"] input::placeholder {{color:#8b94a7 !important; opacity:1;}}
 div[data-baseweb="popover"] * {{background:#fff; color:{INK};}}
-span[data-baseweb="tag"] {{background:#fde5e5 !important;}}
-span[data-baseweb="tag"] * {{background:transparent !important; color:#7a000d !important;}}
-section[data-testid="stSidebar"] [data-testid="stExpander"] {{border:1px solid #46464d; border-radius:8px; background:rgba(255,255,255,.04);}}
-section[data-testid="stSidebar"] [data-testid="stExpander"] summary p {{font-size:.8rem !important; font-weight:600;}}
-.sb-h {{font-size:1.05rem; font-weight:700; margin:.1rem 0 .2rem; display:flex; align-items:center; gap:8px;}}
-.sb-h svg {{width:20px; height:20px; fill:none; stroke:#fff; stroke-width:2; stroke-linecap:round; stroke-linejoin:round;}}
-.sb-sub {{font-size:.66rem; color:#b9b9c2; margin:-.1rem 0 .2rem;}}
-section[data-testid="stSidebar"] hr {{border-color:#46464d; margin:.5rem 0;}}
-section[data-testid="stSidebar"] .stButton button {{background:{RED}; color:#fff; border:none; font-weight:600; width:100%;}}
+span[data-baseweb="tag"] {{background:#fde5e5 !important; border-radius:6px;}}
+span[data-baseweb="tag"] * {{background:transparent !important; color:#a8000f !important; font-size:.68rem;}}
+.sb-h {{font-size:1.05rem; font-weight:700; margin:.1rem 0 .15rem; display:flex; align-items:center; gap:8px;}}
+.sb-h svg {{width:19px; height:19px; fill:none; stroke:{RED}; stroke-width:2; stroke-linecap:round; stroke-linejoin:round;}}
+.sb-sub {{font-size:.68rem; color:{MUTED}; margin:0 0 .5rem; line-height:1.35;}}
+.sb-note {{font-size:.74rem; background:#fff1f1; border-radius:9px; padding:8px 10px; margin:.2rem 0 .5rem; line-height:1.4;}}
+section[data-testid="stSidebar"] hr {{border-color:#e8eaf0; margin:.6rem 0;}}
+section[data-testid="stSidebar"] .stButton button {{background:{RED}; border:none; border-radius:9px; font-weight:600; width:100%;}}
+section[data-testid="stSidebar"] .stButton button p {{color:#fff !important;}}
 
-/* cards */
-.card {{display:flex; align-items:center; gap:12px; box-sizing:border-box; height:100px; margin-bottom:1rem; padding:8px 14px; border-radius:12px;
-  border:1px solid #f1c3c3; background:linear-gradient(135deg,#fff 45%,#ffe6e6); box-shadow:0 2px 8px rgba(160,0,20,.08);
-  animation:rise .75s cubic-bezier(.2,.8,.2,1) both; animation-delay:var(--d,0s);}}
-@keyframes rise {{from {{opacity:0; transform:translateY(18px) scale(.97);}} to {{opacity:1; transform:none;}}}}
-.ico {{flex:none; width:46px; height:46px; border-radius:50%; background:#fff; display:grid; place-items:center; border:1.5px solid #f1a9a9;}}
-.ico svg {{width:26px; height:26px; fill:none; stroke:{RED}; stroke-width:1.9; stroke-linecap:round; stroke-linejoin:round;}}
-.ct {{font-size:.82rem; font-weight:600; color:{INK};}}
-.cv {{font-size:1.55rem; font-weight:700; color:{RED}; line-height:1.15;}}
+/* KPI cards */
+.card {{display:flex; align-items:center; gap:14px; box-sizing:border-box; height:96px; margin-bottom:.1rem; padding:8px 16px;
+  border-radius:14px; background:#fff; border:1px solid #e8eaf0; border-left:5px solid {RED}; box-shadow:0 1px 3px rgba(20,20,40,.06);
+  animation:rise .7s cubic-bezier(.2,.8,.2,1) both; animation-delay:var(--d,0s);}}
+@keyframes rise {{from {{opacity:0; transform:translateY(14px);}} to {{opacity:1; transform:none;}}}}
+.ico {{flex:none; width:46px; height:46px; border-radius:12px; background:#fff1f1; display:grid; place-items:center;}}
+.ico svg {{width:25px; height:25px; fill:none; stroke:{RED}; stroke-width:1.9; stroke-linecap:round; stroke-linejoin:round;}}
+.ct {{font-size:.8rem; font-weight:600; color:{MUTED};}}
+.cv {{font-size:1.6rem; font-weight:700; color:{INK}; line-height:1.15;}}
 .cs {{font-size:.66rem; color:{MUTED}; line-height:1.25;}}
-.pill {{font-size:.58rem; font-weight:600; background:#fff; color:{MUTED}; border:1px solid #f1c3c3; border-radius:99px;
-  padding:0 7px; margin-left:6px; vertical-align:middle;}}
-.st-key-sel {{box-sizing:border-box; height:100px; padding:6px 14px; border-radius:12px; border:1px solid #f1c3c3;
-  background:linear-gradient(135deg,#fff 45%,#ffe6e6); box-shadow:0 2px 8px rgba(160,0,20,.08); animation:rise .75s both;}}
-.st-key-sel label p {{color:{INK} !important; font-size:.78rem !important; font-weight:600;}}
+.pill {{font-size:.58rem; font-weight:600; background:#f3f4f8; color:{MUTED}; border-radius:99px; padding:1px 8px; margin-left:6px; vertical-align:middle;}}
+.st-key-sel {{box-sizing:border-box; height:96px; padding:8px 16px; border-radius:14px; background:#fff; border:1px solid #e8eaf0;
+  border-left:5px solid {RED}; box-shadow:0 1px 3px rgba(20,20,40,.06); animation:rise .7s both;}}
+.st-key-sel label p {{color:{INK} !important; font-size:.8rem !important;}}
 
-/* chart panels */
-.ph {{background:linear-gradient(90deg,#8f000e,#d4001a); color:#fff; padding:4px 12px; border-radius:10px 10px 0 0;
-  margin-bottom:-.45rem; position:relative; z-index:2; min-height:34px;}}
-.pt {{font-weight:600; font-size:.84rem; line-height:1.25;}} .ps {{font-size:.64rem; color:#ffd9d9; line-height:1.2;}}
-[data-testid="stPlotlyChart"], .tk {{background:#fff; border:1.5px solid #f1c3c3; border-top:none; border-radius:0 0 10px 10px;}}
-[data-testid="stPlotlyChart"] {{animation:wipe 1.1s cubic-bezier(.3,.7,.2,1) both; animation-delay:.3s;}}
+/* chart cards: header, own filters, chart */
+[class*="st-key-pn_"] {{background:#fff; border:1px solid #e8eaf0; border-radius:14px; padding:10px 14px 8px; box-sizing:border-box;
+  box-shadow:0 1px 3px rgba(20,20,40,.05);}}
+[class*="st-key-pn_"] div[data-testid="stVerticalBlock"] {{gap:.3rem;}}
+[class*="st-key-pn_"] [data-testid="stMarkdownContainer"] {{margin-bottom:0 !important;}}
+.ph {{margin-bottom:.15rem;}}
+.pt {{font-weight:700; font-size:.9rem; color:{INK}; line-height:1.25; display:flex; gap:8px; align-items:center;}}
+.pt:before {{content:""; width:4px; height:15px; border-radius:2px; background:{RED}; flex:none;}}
+.ps {{font-size:.66rem; color:{MUTED}; line-height:1.2; margin-left:12px;}}
+[class*="st-key-pn_"] div[data-baseweb="select"] > div {{min-height:30px; font-size:.72rem;}}
+[data-testid="stPlotlyChart"] {{animation:wipe 1s cubic-bezier(.3,.7,.2,1) both; animation-delay:.2s;}}
 @keyframes wipe {{from {{clip-path:inset(0 100% 0 0);}} to {{clip-path:inset(0 0 0 0);}}}}
-.tk {{box-sizing:border-box; padding:14px 12px 6px; overflow:hidden; animation:fade 1s both .5s;}}
+.tk {{box-sizing:border-box; padding:6px 2px; overflow:hidden; animation:fade 1s both .4s;}}
 @keyframes fade {{from {{opacity:0;}} to {{opacity:1;}}}}
-.tk div {{font-size:.72rem; color:{INK}; line-height:1.3; margin:3px 0; display:flex; gap:8px;}}
-.tk b {{flex:none; width:7px; height:7px; border-radius:50%; background:{RED}; margin-top:5px;}}
+.tk div {{font-size:.74rem; color:{INK}; line-height:1.35; margin:5px 0; display:flex; gap:8px;}}
+.tk b {{flex:none; width:7px; height:7px; border-radius:50%; background:{RED}; margin-top:6px;}}
 @media (prefers-reduced-motion: reduce) {{* {{animation:none !important;}}}}
 </style>
 """, unsafe_allow_html=True)
@@ -273,6 +272,21 @@ def card(icon, title, value, sub, delay, fixed=False):
 
 def panel(title, sub=""):
     st.markdown(f'<div class="ph"><div class="pt">{title}</div><div class="ps">{sub}</div></div>', unsafe_allow_html=True)
+
+
+def chart_controls(slot, top=False):
+    """One compact row on every chart: chart style + that chart's own filters (+ top-N for the circle chart)."""
+    fl = CHART_FILTERS[slot]
+    cols = st.columns([1.3] + [1.2] * len(fl) + ([.8] if top else []))
+    with cols[0]:
+        st.selectbox("Chart style", STYLES[slot], key=f"s_{slot}", label_visibility="collapsed", help="Chart style")
+    for i, (label, col) in enumerate(fl):
+        with cols[i + 1]:
+            st.multiselect(label, OPTS[col], key=f"cf_{slot}_{i}", placeholder=f"{label}: all", label_visibility="collapsed")
+    if top:
+        with cols[-1]:
+            st.selectbox("Circles shown", TOP_CHOICES, key="cf_circle_top", label_visibility="collapsed",
+                         format_func=lambda x: f"Top {x}")
 
 
 # ------------------------------------------------------------------ chart helpers
@@ -569,11 +583,8 @@ try:
     regions = q("SELECT DISTINCT region AS v FROM customer_features ORDER BY v")["v"].tolist()
     conns = q("SELECT DISTINCT connection_type AS v FROM customer_features ORDER BY v")["v"].tolist()
     as_of = q(f"SELECT {AS_OF} AS d")["d"][0]
-    circle_region = q("SELECT DISTINCT circle_name, region FROM customer_features")
-    opts = {k: q(f"SELECT DISTINCT {col} AS v FROM {CUSTOMERS}{where(dims=False)[0]} ORDER BY v")["v"].dropna().tolist()
-            for k, _, col in DIM_FILTERS}
-    pr = q(f"SELECT MIN({PRICE_COL}) AS lo, MAX({PRICE_COL}) AS hi FROM {CUSTOMERS}").iloc[0]
-    PRICE_RANGE = (int(pr.lo), int(pr.hi))
+    OPTS = {col: q(f"SELECT DISTINCT {col} AS v FROM {CUSTOMERS} ORDER BY v")["v"].dropna().tolist()
+            for col in sorted({c for fl in CHART_FILTERS.values() for _, c in fl})}
 except Exception as e:
     st.error(f"The database does not match the mapping at the top of this file: {e}")
     st.stop()
@@ -581,7 +592,6 @@ st.session_state.setdefault("circle", circles[0])
 st.session_state.setdefault("page", "Overview")
 for k, v in DEFAULTS.items():
     st.session_state.setdefault(k, list(v) if isinstance(v, list) else v)
-st.session_state.setdefault("f_price", PRICE_RANGE)
 
 
 def go_page(name):
@@ -590,7 +600,6 @@ def go_page(name):
 
 def reset_all():
     st.session_state.update({k: (list(v) if isinstance(v, list) else v) for k, v in DEFAULTS.items()})
-    st.session_state["f_price"] = PRICE_RANGE
     st.session_state["circle"] = circles[0]
 
 
@@ -610,44 +619,25 @@ with st.container(key="banner"):
                     'prioritise retention efforts and understand churn patterns.</div></div></div>', unsafe_allow_html=True)
 
 ss = st.session_state
-n_active = ((ss["f_conn"] != "All") + sum(bool(ss[k]) for k, _, _ in DIM_FILTERS) + bool(ss["f_tenure"]) + bool(ss["f_open"])
-            + (tuple(ss["f_price"]) != PRICE_RANGE)
-            + ((ss["f_region"] != "All") + bool(ss["f_circles"]) if page == "Overview" else 0))
 with st.sidebar:
-    st.markdown(f'<div class="sb-h">{FUNNEL_ICON}Filters</div><div class="sb-sub">Apply to every card and chart on this tab'
-                f' · {n_active} active</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sb-h">{FUNNEL_ICON}Filters</div><div class="sb-sub">These apply to every card and chart on this tab. '
+                'Each chart also has its own filters.</div>', unsafe_allow_html=True)
     st.selectbox("Connection type", ["All"] + conns, key="f_conn")
     if page == "Overview":
         st.selectbox("Region", ["All"] + regions, key="f_region")
-        in_region = (circle_region if ss["f_region"] == "All" else circle_region[circle_region.region == ss["f_region"]])
-        circ_opts = sorted(in_region.circle_name)
-        ss["f_circles"] = [c for c in ss["f_circles"] if c in circ_opts]
-        st.multiselect("Circles", circ_opts, key="f_circles", placeholder="All circles")
-        st.slider("Circles shown in ranking", 3, 15, key="f_topn")
     else:
-        st.markdown(f'<div class="sb-sub">Circle: <b>{circle}</b> (change it with Select circle)</div>', unsafe_allow_html=True)
-    with st.expander("Subscriber profile", expanded=True):
-        for key, label, _ in DIM_FILTERS:
-            st.multiselect(label, opts[key], key=key, placeholder="All")
-    with st.expander("Tenure, price and tickets", expanded=True):
-        st.multiselect("Tenure group", TENURE_ORDER, key="f_tenure", placeholder="All")
-        st.slider("Plan price (₹)", PRICE_RANGE[0], PRICE_RANGE[1], key="f_price")
-        st.checkbox("Only subscribers with an open ticket", key="f_open")
-    st.button("↺  Reset filters and styles", on_click=reset_all)
-    with st.expander("Chart styles and screen fit"):
-        for slot in (OVERVIEW_SLOTS if page == "Overview" else DETAIL_SLOTS):
-            st.selectbox(STYLE_LABELS[slot], STYLES[slot], key=f"s_{slot}")
-        st.selectbox("Screen fit", list(SCREENS), key="s_screen", help="Sets chart heights so the page fills your screen without scrolling.")
-    st.markdown(f'<div class="sb-sub">Data through {as_of}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="sb-note">Circle: <b>{circle}</b><br>Change it with <b>Select circle</b> above the charts.</div>',
+                    unsafe_allow_html=True)
+    st.selectbox("Screen fit", list(SCREENS), key="s_screen", help="Sets chart heights so the page fits your screen.")
+    st.button("↺  Reset all filters", on_click=reset_all)
+    st.markdown(f'<div class="sb-sub" style="margin-top:.6rem">Data through {as_of}</div>', unsafe_allow_html=True)
 
-TOP_N = ss["f_topn"]
 conn, region = ss["f_conn"], ss["f_region"]
-
-H_SMALL, H_HERO = SCREENS[st.session_state["s_screen"]]
+H_SMALL, H_HERO = SCREENS[ss["s_screen"]]
 
 
 def pick(slot):
-    return st.session_state[f"s_{slot}"]
+    return ss[f"s_{slot}"]
 
 
 def tenure_chart(kind, df, total, h):
@@ -664,8 +654,8 @@ def conn_chart(kind, df, heat, h):
 
 # ================================================================== OVERVIEW
 if page == "Overview":
-    w, p = where(conn, region, circles=tuple(ss["f_circles"]))
-    base_n = whole(q(f"SELECT COUNT(*) AS n{FROM}{where(dims=False)[0]}")["n"][0])
+    w, p = where(conn, region)                       # page-level filters: cards and key takeaways
+    base_n = whole(q(f"SELECT COUNT(*) AS n{FROM}{where()[0]}")["n"][0])
     kpi = q(f"SELECT {STATS}{FROM}{w}", p).iloc[0]
     k_n, k_left = whole(kpi.n), whole(kpi.leavers)
 
@@ -673,63 +663,91 @@ if page == "Overview":
     k1.markdown(card("people", "Subscriber base", f"{base_n:,}", "All subscribers in scope, every circle and connection type.",
                      0, fixed=True), unsafe_allow_html=True)
     k2.markdown(card("flask", "T4 test result", f"p = {T4_P_VALUE} <small style='font-size:.7rem'>(one-tailed)</small>",
-                     "H1: churn is higher. Significant at 5%: association, not proof of cause.", .12, fixed=True),
+                     "H1: churn is higher. Significant at 5%: association, not proof of cause.", .1, fixed=True),
                 unsafe_allow_html=True)
     k3.markdown(card("trend", "Filtered churn", f"{100 * k_left / k_n:.2f}%" if k_n else "n/a",
                      f"{k_left:,} of {k_n:,} subscribers in the filters left (leaver = churned; full period).",
-                     .24), unsafe_allow_html=True)
+                     .2), unsafe_allow_html=True)
     if not k_n:
         st.warning("No subscribers match these filters. Widen or reset them in the left panel.")
         st.stop()
 
-    t_sql = f"SELECT {TENURE_GRP} AS lab, {STATS}{FROM}{w} GROUP BY lab ORDER BY MIN({TENURE_MONTHS})"
-    c_sql = f"SELECT {CIRCLE_COL} AS lab, {STATS}{FROM}{w} GROUP BY lab ORDER BY rate IS NULL, rate DESC LIMIT {TOP_N}"
-    p_sql = f"SELECT {CONN_COL} AS lab, {STATS}{FROM}{w} GROUP BY lab ORDER BY rate IS NULL, rate DESC"
-    hz_sql = f"SELECT {TENURE_GRP} AS rw, {CONN_COL} AS cl, {STATS}{FROM}{w} GROUP BY rw, cl"
-    w_in = f"{w}{' AND ' if w else ' WHERE '}{CIRCLE_COL} IN (SELECT lab FROM ({c_sql}))"
+    by_tenure = lambda wh: f"SELECT {TENURE_GRP} AS lab, {STATS}{FROM}{wh} GROUP BY lab ORDER BY MIN({TENURE_MONTHS})"
+    by_circle = lambda wh, n: f"SELECT {CIRCLE_COL} AS lab, {STATS}{FROM}{wh} GROUP BY lab ORDER BY rate IS NULL, rate DESC LIMIT {n}"
+    by_conn = lambda wh: f"SELECT {CONN_COL} AS lab, {STATS}{FROM}{wh} GROUP BY lab ORDER BY rate IS NULL, rate DESC"
+
+    # each chart reads the page-level filters plus its own filters
+    wt, pt = where(conn, region, flt=chart_filters("tenure"))
+    t_sql = by_tenure(wt)
+    tenure = q(t_sql, pt)
+    tt = top(t_sql, pt)
+
+    wc, pc = where(conn, region, flt=chart_filters("circle"))
+    top_n = ss["cf_circle_top"]
+    c_sql = by_circle(wc, top_n)
+    circ = q(c_sql, pc)
+    tc = top(c_sql, pc)
+    w_in = f"{wc}{' AND ' if wc else ' WHERE '}{CIRCLE_COL} IN (SELECT lab FROM ({c_sql}))"
     hc_sql = f"SELECT {CIRCLE_COL} AS rw, {TENURE_GRP} AS cl, {STATS}{FROM}{w_in} GROUP BY rw, cl"
-    tenure, circ, pay, heat_z = q(t_sql, p), q(c_sql, p), q(p_sql, p), q(hz_sql, p)
-    tt, tc, tp, tl = top(t_sql, p), top(c_sql, p), top(p_sql, p), top(p_sql, p, highest=False)
+
+    wp, pp = where(conn, region, flt=chart_filters("conn"))
+    p_sql = by_conn(wp)
+    hz_sql = f"SELECT {TENURE_GRP} AS rw, {CONN_COL} AS cl, {STATS}{FROM}{wp} GROUP BY rw, cl"
+    pay, heat_z = q(p_sql, pp), q(hz_sql, pp)
+    tp, tl = top(p_sql, pp), top(p_sql, pp, highest=False)
 
     left, right = st.columns([5, 7])
     with left:
-        panel(f"Churn by tenure – highest for {tt[0]} subscribers ({tt[1]:.1f}%)" if tt else "Churn by tenure",
-              f"Churn rate by tenure group; dashed line = {NATIONAL_REF:g}% national reference (not a target)")
-        show(tenure_chart(pick("tenure"), tenure, k_left, H_HERO))
+        with st.container(key="pn_tenure"):
+            panel(f"Churn by tenure – highest for {tt[0]} subscribers ({tt[1]:.1f}%)" if tt else "Churn by tenure",
+                  f"Churn rate by tenure group; dashed line = {NATIONAL_REF:g}% national reference (not a target)")
+            chart_controls("tenure")
+            show(tenure_chart(pick("tenure"), tenure, whole(tenure["leavers"].sum()), H_HERO) if len(tenure) else empty_chart(H_HERO))
     with right:
-        panel(f"Churn by circle – {tc[0]} is highest ({tc[1]:.1f}%)" if tc else "Churn by circle",
-              f"Top {TOP_N} circles by churn rate; groups under {MIN_GROUP} show counts only")
-        kind = pick("circle")
-        if kind == "Heatmap":
-            fig = heatmap(q(hc_sql, p + p), H_SMALL, row_order=circ["lab"].tolist(), col_order=TENURE_ORDER, two_line=False)
-        else:
-            fig = {"Bubble": bubble, "Treemap": treemap, "Funnel": funnel,
-                   "Lollipop": lambda d, h: lollipop(d, h, horizontal=True)}[kind](circ, H_SMALL)
-        show(fig)
+        with st.container(key="pn_circle"):
+            panel(f"Churn by circle – {tc[0]} is highest ({tc[1]:.1f}%)" if tc else "Churn by circle",
+                  f"Top {top_n} circles by churn rate; groups under {MIN_GROUP} show counts only")
+            chart_controls("circle", top=True)
+            kind = pick("circle")
+            if circ.empty:
+                fig = empty_chart(H_SMALL)
+            elif kind == "Heatmap":
+                fig = heatmap(q(hc_sql, pc + pc), H_SMALL, row_order=circ["lab"].tolist(), col_order=TENURE_ORDER, two_line=False)
+            else:
+                fig = {"Bubble": bubble, "Treemap": treemap, "Funnel": funnel,
+                       "Lollipop": lambda d, h: lollipop(d, h, horizontal=True)}[kind](circ, H_SMALL)
+            show(fig)
         r1, r2 = st.columns(2)
         with r1:
-            panel(f"Plan type – {tp[0]} churns more ({tp[1]:.1f}%)" if tp else "Prepaid vs postpaid churn",
-                  "Churn rate and subscriber counts by connection type")
-            show(conn_chart(pick("conn"), pay, heat_z, H_SMALL))
+            with st.container(key="pn_conn"):
+                panel(f"Plan type – {tp[0]} churns more ({tp[1]:.1f}%)" if tp else "Prepaid vs postpaid churn",
+                      "Churn rate and subscriber counts by connection type")
+                chart_controls("conn")
+                show(conn_chart(pick("conn"), pay, heat_z, H_SMALL) if len(pay) else empty_chart(H_SMALL))
         with r2:
-            gap = q(f"SELECT ROUND(MAX(rate) - MIN(rate), 1) AS g FROM ({p_sql}) WHERE rate IS NOT NULL", p)["g"][0]
-            ab = q(f"SELECT SUM(CASE WHEN rate > {NATIONAL_REF} THEN 1 ELSE 0 END) AS a, COUNT(rate) AS t FROM ({c_sql})", p).iloc[0]
+            # key takeaways use the page-level filters only, so they always describe the whole selection
+            g_t, g_c, g_p = top(by_tenure(w), p), top(by_circle(w, TOP_N), p), top(by_conn(w), p)
+            g_l = top(by_conn(w), p, highest=False)
+            gap = q(f"SELECT ROUND(MAX(rate) - MIN(rate), 1) AS g FROM ({by_conn(w)}) WHERE rate IS NOT NULL", p)["g"][0]
+            ab = q(f"SELECT SUM(CASE WHEN rate > {NATIONAL_REF} THEN 1 ELSE 0 END) AS a, COUNT(rate) AS t FROM ({by_circle(w, TOP_N)})", p).iloc[0]
             lines = []
-            if tc:
-                lines.append(f"<b></b><span><strong>{tc[0]}</strong> has the highest circle churn at {tc[1]:.1f}%.</span>")
-            if tt:
-                lines.append(f"<b></b><span>Churn is highest for <strong>{tt[0]}</strong> tenure ({tt[1]:.1f}%).</span>")
-            if tp and tl and tp[0] != tl[0] and pd.notna(gap):
-                lines.append(f"<b></b><span><strong>{tp[0]}</strong> churns {gap:.1f} pp more than {tl[0]}.</span>")
+            if g_c:
+                lines.append(f"<b></b><span><strong>{g_c[0]}</strong> has the highest circle churn at {g_c[1]:.1f}%.</span>")
+            if g_t:
+                lines.append(f"<b></b><span>Churn is highest for <strong>{g_t[0]}</strong> tenure ({g_t[1]:.1f}%).</span>")
+            if g_p and g_l and g_p[0] != g_l[0] and pd.notna(gap):
+                lines.append(f"<b></b><span><strong>{g_p[0]}</strong> churns {gap:.1f} pp more than {g_l[0]}.</span>")
             if ab.t:
                 lines.append(f"<b></b><span>{whole(ab.a)} of the top {whole(ab.t)} circles are above the {NATIONAL_REF:g}% reference. "
                              "Association, not cause.</span>")
-            panel("Key takeaways", "Generated from the current filters")
-            st.markdown(f'<div class="tk" style="height:{H_SMALL}px">' + "".join(f"<div>{x}</div>" for x in lines) + "</div>", unsafe_allow_html=True)
+            with st.container(key="pn_take"):
+                panel("Key takeaways", "Based on the connection type and region filters")
+                st.markdown(f'<div class="tk" style="height:{H_SMALL + 50}px">' + "".join(f"<div>{x}</div>" for x in lines) + "</div>",
+                            unsafe_allow_html=True)
 
 # ================================================================== CIRCLE ANALYSIS
 else:
-    w, p = where(conn, circle=circle)
+    w, p = where(conn, circle=circle)               # page-level filters: cards
     s = q(f"SELECT {STATS}, ROUND(100.0 * {LEFT} / COUNT(*) - ?, 2) AS gap{FROM}{w}", (NATIONAL_REF,) + p).iloc[0]
     s_n, s_left = whole(s.n), whole(s.leavers)
     open_case = f"CASE WHEN {OPEN_SQL} THEN 1 ELSE 0 END"
@@ -743,49 +761,74 @@ else:
     side = "above" if pd.notna(s.gap) and s.gap > 0 else "below"
     k2.markdown(card("trend", f"{circle}: subscribers and leavers{note}", f"{s_n:,} · {s_left:,}",
                      (f"Churn {100 * s_left / s_n:.1f}%, {abs(s.gap):.1f} pp {side} the {NATIONAL_REF:g}% national reference "
-                      "(a reference, not a target).") if s_n and pd.notna(s.gap) else "Too few subscribers to show a rate.", 0),
+                      "(a reference, not a target).") if s_n and pd.notna(s.gap) else "Too few subscribers to show a rate.", 0.1),
                 unsafe_allow_html=True)
     k3.markdown(card("ticket", f"{circle}: open tickets{note}", f"{whole(tk.open_n):,} · {tk.share if pd.notna(tk.share) else 0}%",
-                     f"Subscribers with at least one unresolved complaint, as a share of {s_n:,}.", .12), unsafe_allow_html=True)
+                     f"Subscribers with at least one unresolved complaint, as a share of {s_n:,}.", .2), unsafe_allow_html=True)
     if not s_n:
         st.warning("No subscribers in this circle match these filters. Widen or reset them in the left panel.")
         st.stop()
 
-    m_where = where(conn, circle=circle, extra=(LEAVER_SQL, f"{LEAVE_DATE_COL} IS NOT NULL"))[0]
-    m_sql = (f"SELECT strftime('%Y-%m', {LEAVE_DATE_COL}) AS month, COUNT(*) AS leavers{FROM}{m_where} "
-             f"GROUP BY month ORDER BY month")
-    t_sql = f"SELECT {TENURE_GRP} AS lab, {STATS}{FROM}{w} GROUP BY lab ORDER BY MIN({TENURE_MONTHS})"
-    p_sql = f"SELECT {CONN_COL} AS lab, {STATS}{FROM}{w} GROUP BY lab ORDER BY rate IS NULL, rate DESC"
-    hz_sql = f"SELECT {TENURE_GRP} AS rw, {CONN_COL} AS cl, {STATS}{FROM}{w} GROUP BY rw, cl"
-    month, tenure, pay, heat_z = q(m_sql, p), q(t_sql, p), q(p_sql, p), q(hz_sql, p)
-    peak = q(f"SELECT month, leavers FROM ({m_sql}) ORDER BY leavers DESC LIMIT 1", p)
-    tt, tp = top(t_sql, p), top(p_sql, p)
+    # monthly leavers (own filters)
+    wm, pm = where(conn, circle=circle, extra=(LEAVER_SQL, f"{LEAVE_DATE_COL} IS NOT NULL"), flt=chart_filters("d_month"))
+    m_sql = (f"SELECT strftime('%Y-%m', {LEAVE_DATE_COL}) AS month, COUNT(*) AS leavers{FROM}{wm} GROUP BY month ORDER BY month")
+    month = q(m_sql, pm)
+    peak = q(f"SELECT month, leavers FROM ({m_sql}) ORDER BY leavers DESC LIMIT 1", pm)
+
+    # circle vs national (own filters)
+    wk, pk = where(conn, circle=circle, flt=chart_filters("d_compare"))
+    sc = q(f"SELECT {STATS}, ROUND(100.0 * {LEFT} / COUNT(*) - ?, 2) AS gap{FROM}{wk}", (NATIONAL_REF,) + pk).iloc[0]
+    c_n, c_left = whole(sc.n), whole(sc.leavers)
+    c_side = "above" if pd.notna(sc.gap) and sc.gap > 0 else "below"
+
+    # tenure (own filters)
+    wt, pt = where(conn, circle=circle, flt=chart_filters("d_tenure"))
+    t_sql = f"SELECT {TENURE_GRP} AS lab, {STATS}{FROM}{wt} GROUP BY lab ORDER BY MIN({TENURE_MONTHS})"
+    tenure = q(t_sql, pt)
+    tt = top(t_sql, pt)
+
+    # connection type (own filters)
+    wp, pp = where(conn, circle=circle, flt=chart_filters("d_conn"))
+    p_sql = f"SELECT {CONN_COL} AS lab, {STATS}{FROM}{wp} GROUP BY lab ORDER BY rate IS NULL, rate DESC"
+    hz_sql = f"SELECT {TENURE_GRP} AS rw, {CONN_COL} AS cl, {STATS}{FROM}{wp} GROUP BY rw, cl"
+    pay, heat_z = q(p_sql, pp), q(hz_sql, pp)
+    tp = top(p_sql, pp)
 
     left, right = st.columns([5, 7])
     with left:
-        if month.empty:
-            panel(f"{circle}: monthly leavers", "No leave dates available for these filters")
-        else:
-            panel(f"{circle}: most leavers left in {peak['month'][0]} ({peak['leavers'][0]:,})",
-                  f"Monthly leaver counts, {month['month'].iloc[0]} to {month['month'].iloc[-1]}")
-        show(month_chart(month, pick("d_month"), H_HERO))
+        with st.container(key="pn_month"):
+            if month.empty:
+                panel(f"{circle}: monthly leavers", "No leave dates available for these filters")
+            else:
+                panel(f"{circle}: most leavers left in {peak['month'][0]} ({peak['leavers'][0]:,})",
+                      f"Monthly leaver counts, {month['month'].iloc[0]} to {month['month'].iloc[-1]}")
+            chart_controls("d_month")
+            show(month_chart(month, pick("d_month"), H_HERO) if len(month) else empty_chart(H_HERO))
     with right:
-        panel(f"{circle} is {abs(s.gap):.1f} pp {side} the national reference" if s_n and pd.notna(s.gap)
-              else f"{circle}: too few subscribers to rate", f"Reference {NATIONAL_REF:g}% is supplied; it is not a target")
-        ck = pick("d_compare")
-        if ck == "Waterfall":
-            fig = waterfall_compare(circle, s.rate, s_n, s.gap, H_SMALL)
-        elif ck == "Dumbbell":
-            fig = dumbbell(circle, s.rate, s_n, H_SMALL)
-        else:
-            fig = bullet(pd.DataFrame({"lab": [circle], "n": [s_n], "leavers": [s_left], "rate": [s.rate]}), H_SMALL)
-        show(fig)
+        with st.container(key="pn_compare"):
+            panel(f"{circle} is {abs(sc.gap):.1f} pp {c_side} the national reference" if c_n and pd.notna(sc.gap)
+                  else f"{circle}: too few subscribers to rate", f"Reference {NATIONAL_REF:g}% is supplied; it is not a target")
+            chart_controls("d_compare")
+            ck = pick("d_compare")
+            if not c_n:
+                fig = empty_chart(H_SMALL)
+            elif ck == "Waterfall":
+                fig = waterfall_compare(circle, sc.rate, c_n, sc.gap, H_SMALL)
+            elif ck == "Dumbbell":
+                fig = dumbbell(circle, sc.rate, c_n, H_SMALL)
+            else:
+                fig = bullet(pd.DataFrame({"lab": [circle], "n": [c_n], "leavers": [c_left], "rate": [sc.rate]}), H_SMALL)
+            show(fig)
         r1, r2 = st.columns(2)
         with r1:
-            panel(f"Tenure in {circle} – highest at {tt[0]} ({tt[1]:.1f}%)" if tt else f"Tenure in {circle}",
-                  "Churn rate by tenure group, with counts")
-            show(tenure_chart(pick("d_tenure"), tenure, s_left, H_SMALL))
+            with st.container(key="pn_dtenure"):
+                panel(f"Tenure in {circle} – highest at {tt[0]} ({tt[1]:.1f}%)" if tt else f"Tenure in {circle}",
+                      "Churn rate by tenure group, with counts")
+                chart_controls("d_tenure")
+                show(tenure_chart(pick("d_tenure"), tenure, whole(tenure["leavers"].sum()), H_SMALL) if len(tenure) else empty_chart(H_SMALL))
         with r2:
-            panel(f"{circle}: {tp[0]} churns more ({tp[1]:.1f}%)" if tp else f"{circle}: prepaid vs postpaid",
-                  "Churn rate and counts by connection type")
-            show(conn_chart(pick("d_conn"), pay, heat_z, H_SMALL))
+            with st.container(key="pn_dconn"):
+                panel(f"{circle}: {tp[0]} churns more ({tp[1]:.1f}%)" if tp else f"{circle}: prepaid vs postpaid",
+                      "Churn rate and counts by connection type")
+                chart_controls("d_conn")
+                show(conn_chart(pick("d_conn"), pay, heat_z, H_SMALL) if len(pay) else empty_chart(H_SMALL))
