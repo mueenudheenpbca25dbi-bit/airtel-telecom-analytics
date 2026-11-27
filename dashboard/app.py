@@ -18,11 +18,11 @@ st.set_page_config(page_title="Airtel retention", page_icon="📶", layout="wide
 # ------------------------------------------------------------------ configuration
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent if HERE.name == "dashboard" else HERE
-# Database lookup: AIRTEL_DB env var, then airtel.db next to this file, then data/raw/airtel.db.
-# Files under 100 KB are ignored (empty placeholders).
-DB_CANDIDATES = [os.environ.get("AIRTEL_DB", ""), HERE / "airtel.db",
-                 ROOT / "data" / "raw" / "airtel.db", HERE / "data" / "raw" / "airtel.db"]
-DB_PATH = next((Path(p) for p in DB_CANDIDATES if p and Path(p).is_file() and Path(p).stat().st_size > 100_000), None)
+# Database path (fixed). Set AIRTEL_DB to override it.
+DB_PATH = Path(os.environ.get("AIRTEL_DB") or
+               r"C:\Users\MUEENUDHEEN\OneDrive\Desktop\airtel-telecom-analytics\data\airtel_dashboard_slim.db")
+if not DB_PATH.is_file():
+    DB_PATH = None
 
 # ---- Mapping to the Airtel database (edit here if your validated definitions differ) ----
 CUSTOMERS = ("customers c JOIN circles ci ON ci.circle_id = c.circle_id "
@@ -527,8 +527,8 @@ def show(fig):
 
 # ------------------------------------------------------------------ state, banner, sidebar
 if DB_PATH is None:
-    st.error("Could not find the Airtel database. Put airtel.db (with the customers table) in data/raw/ "
-             "or next to this file, or set the AIRTEL_DB environment variable.")
+    st.error(r"Could not find the Airtel database at C:\Users\MUEENUDHEEN\OneDrive\Desktop\airtel-telecom-analytics\data\airtel_dashboard_slim.db. "
+             "Check that the file exists, or set the AIRTEL_DB environment variable.")
     st.stop()
 try:
     circles = q("SELECT circle_name AS v FROM circles ORDER BY v")["v"].tolist()
