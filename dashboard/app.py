@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 st.set_page_config(page_title="Airtel retention", page_icon="📶", layout="wide",
-                   initial_sidebar_state="collapsed")
+                   initial_sidebar_state="expanded")
 
 # ------------------------------------------------------------------ configuration
 HERE = Path(__file__).resolve().parent
@@ -64,7 +64,12 @@ STYLE_LABELS = {"tenure": "Tenure chart", "circle": "Circle chart", "conn": "Con
                 "d_month": "Monthly leavers chart", "d_compare": "Circle vs national chart",
                 "d_tenure": "Tenure chart", "d_conn": "Connection chart"}
 OVERVIEW_SLOTS, DETAIL_SLOTS = ["tenure", "circle", "conn"], ["d_month", "d_compare", "d_tenure", "d_conn"]
-DEFAULTS = {"f_conn": "All", "f_region": "All", "s_screen": "Large monitor (1080p)", **{f"s_{k}": v[0] for k, v in STYLES.items()}}
+# Extra subscriber filters (multi-select; empty = all): (session key, label, column)
+DIM_FILTERS = [("f_plan", "Plan", "c.plan_name"), ("f_age", "Age band", "c.age_band"), ("f_gender", "Gender", "c.gender"),
+               ("f_device", "Device type", "c.device_type"), ("f_channel", "Acquisition channel", "c.acquisition_channel")]
+PRICE_COL = "c.price_inr"
+DEFAULTS = {"f_conn": "All", "f_region": "All", "f_circles": [], "f_tenure": [], "f_open": False, "f_topn": TOP_N,
+            **{k: [] for k, _, _ in DIM_FILTERS}, "s_screen": "Large monitor (1080p)", **{f"s_{k}": v[0] for k, v in STYLES.items()}}
 
 # ------------------------------------------------------------------ SQL fragments
 LEFT = f"SUM(CASE WHEN {LEAVER_SQL} THEN 1 ELSE 0 END)"
@@ -86,7 +91,12 @@ def q(sql, params=()):
     return pd.read_sql_query(sql, connect(), params=params)
 
 
-def where(conn="All", region="All", circle=None, extra=()):
+def marks(vals):
+    return ",".join("?" * len(vals))
+
+
+def where(conn="All", region="All", circle=None, extra=(), dims=True, circles=()):
+    """WHERE clause shared by every card and chart, so one filter set drives the whole page."""
     conds, params = ([SCOPE_SQL] if SCOPE_SQL else []) + list(extra), []
     if conn != "All":
         conds.append(f"{CONN_COL} = ?")
@@ -94,9 +104,30 @@ def where(conn="All", region="All", circle=None, extra=()):
     if circle:
         conds.append(f"{CIRCLE_COL} = ?")
         params.append(circle)
-    elif region != "All":
-        conds.append(f"{REGION_COL} = ?")
-        params.append(region)
+    else:
+        if region != "All":
+            conds.append(f"{REGION_COL} = ?")
+            params.append(region)
+        if circles:
+            conds.append(f"{CIRCLE_COL} IN ({marks(circles)})")
+            params += list(circles)
+    if dims:
+        ss = st.session_state
+        for key, _, col in DIM_FILTERS:
+            vals = list(ss.get(key) or [])
+            if vals:
+                conds.append(f"{col} IN ({marks(vals)})")
+                params += vals
+        tv = list(ss.get("f_tenure") or [])
+        if tv:
+            conds.append(f"{TENURE_GRP} IN ({marks(tv)})")
+            params += tv
+        if ss.get("f_open"):
+            conds.append(f"({OPEN_SQL})")
+        lo, hi = ss.get("f_price", PRICE_RANGE)
+        if (lo, hi) != PRICE_RANGE:
+            conds.append(f"{PRICE_COL} BETWEEN ? AND ?")
+            params += [lo, hi]
     return (" WHERE " + " AND ".join(conds) if conds else ""), tuple(params)
 
 
@@ -148,13 +179,17 @@ div[data-testid="stElementContainer"] {{margin:0;}}
 
 /* dark filter sidebar */
 section[data-testid="stSidebar"] {{background:linear-gradient(180deg,#1b1b1f 0%,#2a2a2f 62%,#6b0712 100%);
-  min-width:250px !important; max-width:250px !important; border-right:3px solid {RED};}}
+  min-width:280px !important; max-width:280px !important; border-right:3px solid {RED};}}
 section[data-testid="stSidebar"] * {{color:#f4f4f6;}}
 section[data-testid="stSidebar"] .block-container, section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {{padding-top:.6rem;}}
 section[data-testid="stSidebar"] label p {{color:#e9e9ee !important; font-size:.76rem !important; margin:0 !important;}}
 div[data-baseweb="select"] > div {{background:#fff !important; border:none; border-radius:8px; min-height:34px;}}
 div[data-baseweb="select"] * {{color:{INK} !important;}}
 div[data-baseweb="popover"] * {{background:#fff; color:{INK};}}
+span[data-baseweb="tag"] {{background:#fde5e5 !important;}}
+span[data-baseweb="tag"] * {{background:transparent !important; color:#7a000d !important;}}
+section[data-testid="stSidebar"] [data-testid="stExpander"] {{border:1px solid #46464d; border-radius:8px; background:rgba(255,255,255,.04);}}
+section[data-testid="stSidebar"] [data-testid="stExpander"] summary p {{font-size:.8rem !important; font-weight:600;}}
 .sb-h {{font-size:1.05rem; font-weight:700; margin:.1rem 0 .2rem; display:flex; align-items:center; gap:8px;}}
 .sb-h svg {{width:20px; height:20px; fill:none; stroke:#fff; stroke-width:2; stroke-linecap:round; stroke-linejoin:round;}}
 .sb-sub {{font-size:.66rem; color:#b9b9c2; margin:-.1rem 0 .2rem;}}
@@ -534,13 +569,19 @@ try:
     regions = q("SELECT DISTINCT region AS v FROM customer_features ORDER BY v")["v"].tolist()
     conns = q("SELECT DISTINCT connection_type AS v FROM customer_features ORDER BY v")["v"].tolist()
     as_of = q(f"SELECT {AS_OF} AS d")["d"][0]
+    circle_region = q("SELECT DISTINCT circle_name, region FROM customer_features")
+    opts = {k: q(f"SELECT DISTINCT {col} AS v FROM {CUSTOMERS}{where(dims=False)[0]} ORDER BY v")["v"].dropna().tolist()
+            for k, _, col in DIM_FILTERS}
+    pr = q(f"SELECT MIN({PRICE_COL}) AS lo, MAX({PRICE_COL}) AS hi FROM {CUSTOMERS}").iloc[0]
+    PRICE_RANGE = (int(pr.lo), int(pr.hi))
 except Exception as e:
     st.error(f"The database does not match the mapping at the top of this file: {e}")
     st.stop()
 st.session_state.setdefault("circle", circles[0])
 st.session_state.setdefault("page", "Overview")
 for k, v in DEFAULTS.items():
-    st.session_state.setdefault(k, v)
+    st.session_state.setdefault(k, list(v) if isinstance(v, list) else v)
+st.session_state.setdefault("f_price", PRICE_RANGE)
 
 
 def go_page(name):
@@ -548,7 +589,8 @@ def go_page(name):
 
 
 def reset_all():
-    st.session_state.update(DEFAULTS)
+    st.session_state.update({k: (list(v) if isinstance(v, list) else v) for k, v in DEFAULTS.items()})
+    st.session_state["f_price"] = PRICE_RANGE
     st.session_state["circle"] = circles[0]
 
 
@@ -567,21 +609,39 @@ with st.container(key="banner"):
                     f'<div class="ttl">{heading}</div><div class="rdr">This dashboard helps Head of Retention '
                     'prioritise retention efforts and understand churn patterns.</div></div></div>', unsafe_allow_html=True)
 
+ss = st.session_state
+n_active = ((ss["f_conn"] != "All") + sum(bool(ss[k]) for k, _, _ in DIM_FILTERS) + bool(ss["f_tenure"]) + bool(ss["f_open"])
+            + (tuple(ss["f_price"]) != PRICE_RANGE)
+            + ((ss["f_region"] != "All") + bool(ss["f_circles"]) if page == "Overview" else 0))
 with st.sidebar:
-    st.markdown(f'<div class="sb-h">{FUNNEL_ICON}Filters</div><div class="sb-sub">Apply to every card and chart</div>',
-                unsafe_allow_html=True)
-    conn = st.selectbox("Connection type", ["All"] + conns, key="f_conn")
-    region = st.selectbox("Region", ["All"] + regions, key="f_region", disabled=(page != "Overview"),
-                          help="On Circle Analysis, the circle selector replaces this filter.")
-    st.markdown("---")
-    st.markdown('<div class="sb-h">Chart styles</div><div class="sb-sub">Pick how each chart is drawn</div>', unsafe_allow_html=True)
-    for slot in (OVERVIEW_SLOTS if page == "Overview" else DETAIL_SLOTS):
-        st.selectbox(STYLE_LABELS[slot], STYLES[slot], key=f"s_{slot}")
-    st.selectbox("Screen fit", list(SCREENS), key="s_screen", help="Sets chart heights so the page fills your screen without scrolling.")
-    st.markdown("---")
+    st.markdown(f'<div class="sb-h">{FUNNEL_ICON}Filters</div><div class="sb-sub">Apply to every card and chart on this tab'
+                f' · {n_active} active</div>', unsafe_allow_html=True)
+    st.selectbox("Connection type", ["All"] + conns, key="f_conn")
+    if page == "Overview":
+        st.selectbox("Region", ["All"] + regions, key="f_region")
+        in_region = (circle_region if ss["f_region"] == "All" else circle_region[circle_region.region == ss["f_region"]])
+        circ_opts = sorted(in_region.circle_name)
+        ss["f_circles"] = [c for c in ss["f_circles"] if c in circ_opts]
+        st.multiselect("Circles", circ_opts, key="f_circles", placeholder="All circles")
+        st.slider("Circles shown in ranking", 3, 15, key="f_topn")
+    else:
+        st.markdown(f'<div class="sb-sub">Circle: <b>{circle}</b> (change it with Select circle)</div>', unsafe_allow_html=True)
+    with st.expander("Subscriber profile", expanded=True):
+        for key, label, _ in DIM_FILTERS:
+            st.multiselect(label, opts[key], key=key, placeholder="All")
+    with st.expander("Tenure, price and tickets", expanded=True):
+        st.multiselect("Tenure group", TENURE_ORDER, key="f_tenure", placeholder="All")
+        st.slider("Plan price (₹)", PRICE_RANGE[0], PRICE_RANGE[1], key="f_price")
+        st.checkbox("Only subscribers with an open ticket", key="f_open")
     st.button("↺  Reset filters and styles", on_click=reset_all)
+    with st.expander("Chart styles and screen fit"):
+        for slot in (OVERVIEW_SLOTS if page == "Overview" else DETAIL_SLOTS):
+            st.selectbox(STYLE_LABELS[slot], STYLES[slot], key=f"s_{slot}")
+        st.selectbox("Screen fit", list(SCREENS), key="s_screen", help="Sets chart heights so the page fills your screen without scrolling.")
     st.markdown(f'<div class="sb-sub">Data through {as_of}</div>', unsafe_allow_html=True)
 
+TOP_N = ss["f_topn"]
+conn, region = ss["f_conn"], ss["f_region"]
 
 H_SMALL, H_HERO = SCREENS[st.session_state["s_screen"]]
 
@@ -604,8 +664,8 @@ def conn_chart(kind, df, heat, h):
 
 # ================================================================== OVERVIEW
 if page == "Overview":
-    w, p = where(conn, region)
-    base_n = whole(q(f"SELECT COUNT(*) AS n{FROM}{where()[0]}")["n"][0])
+    w, p = where(conn, region, circles=tuple(ss["f_circles"]))
+    base_n = whole(q(f"SELECT COUNT(*) AS n{FROM}{where(dims=False)[0]}")["n"][0])
     kpi = q(f"SELECT {STATS}{FROM}{w}", p).iloc[0]
     k_n, k_left = whole(kpi.n), whole(kpi.leavers)
 
@@ -618,6 +678,9 @@ if page == "Overview":
     k3.markdown(card("trend", "Filtered churn", f"{100 * k_left / k_n:.2f}%" if k_n else "n/a",
                      f"{k_left:,} of {k_n:,} subscribers in the filters left (leaver = churned; full period).",
                      .24), unsafe_allow_html=True)
+    if not k_n:
+        st.warning("No subscribers match these filters. Widen or reset them in the left panel.")
+        st.stop()
 
     t_sql = f"SELECT {TENURE_GRP} AS lab, {STATS}{FROM}{w} GROUP BY lab ORDER BY MIN({TENURE_MONTHS})"
     c_sql = f"SELECT {CIRCLE_COL} AS lab, {STATS}{FROM}{w} GROUP BY lab ORDER BY rate IS NULL, rate DESC LIMIT {TOP_N}"
@@ -684,6 +747,9 @@ else:
                 unsafe_allow_html=True)
     k3.markdown(card("ticket", f"{circle}: open tickets{note}", f"{whole(tk.open_n):,} · {tk.share if pd.notna(tk.share) else 0}%",
                      f"Subscribers with at least one unresolved complaint, as a share of {s_n:,}.", .12), unsafe_allow_html=True)
+    if not s_n:
+        st.warning("No subscribers in this circle match these filters. Widen or reset them in the left panel.")
+        st.stop()
 
     m_where = where(conn, circle=circle, extra=(LEAVER_SQL, f"{LEAVE_DATE_COL} IS NOT NULL"))[0]
     m_sql = (f"SELECT strftime('%Y-%m', {LEAVE_DATE_COL}) AS month, COUNT(*) AS leavers{FROM}{m_where} "
